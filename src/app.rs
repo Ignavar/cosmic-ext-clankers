@@ -1,13 +1,30 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::config::Config;
-use crate::fl;
+use crate::models::gemini::{self, get_gemini_response};
+use cosmic::Element;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
-use cosmic::iced::{window::Id, Limits, Subscription};
+use cosmic::iced::Background;
+use cosmic::iced::{
+    Subscription,
+    widget::{self, column},
+    window::Id,
+};
+use cosmic::iced_runtime::task::widget;
 use cosmic::iced_winit::commands::popup::{destroy_popup, get_popup};
 use cosmic::prelude::*;
-use cosmic::widget;
+use cosmic::widget::container::{self};
 use futures_util::SinkExt;
+use rdev::display_size;
+use std::fmt::format;
+use std::sync::Arc;
+
+pub const APPID: &str = "com.github.Ignavar.cosmic-ai-interface";
+
+pub struct Chat {
+    pub role: String,
+    pub content: String,
+}
 
 /// The application model stores app-specific state used to describe its interface and
 /// drive its logic.
@@ -19,8 +36,10 @@ pub struct AppModel {
     popup: Option<Id>,
     /// Configuration data that persists between application runs.
     config: Config,
-    /// Example row toggler.
-    example_row: bool,
+    /// Input text field.
+    input_text: String,
+    /// Chat history.
+    chat_history: Arc<Vec<Chat>>,
 }
 
 /// Messages emitted by the application and its widgets.
@@ -30,7 +49,15 @@ pub enum Message {
     PopupClosed(Id),
     SubscriptionChannel,
     UpdateConfig(Config),
-    ToggleExampleRow(bool),
+    SubmitInput,
+    InputChanged(String),
+    GeminiMessage(gemini::Message),
+}
+
+impl From<gemini::Message> for Message {
+    fn from(message: gemini::Message) -> Self {
+        Self::GeminiMessage(message)
+    }
 }
 
 /// Create a COSMIC application from the app model
@@ -45,7 +72,7 @@ impl cosmic::Application for AppModel {
     type Message = Message;
 
     /// Unique identifier in RDNN (reverse domain name notation) format.
-    const APP_ID: &'static str = "com.github.Ignavar.cosmic-ai-interface";
+    const APP_ID: &'static str = APPID;
 
     fn core(&self) -> &cosmic::Core {
         &self.core
@@ -93,7 +120,7 @@ impl cosmic::Application for AppModel {
     fn view(&self) -> Element<'_, Self::Message> {
         self.core
             .applet
-            .icon_button("display-symbolic")
+            .icon_button(constcat::concat!(APPID, "-symbolic"))
             .on_press(Message::TogglePopup)
             .into()
     }
@@ -102,15 +129,58 @@ impl cosmic::Application for AppModel {
     /// multiple poups, you may match the id parameter to determine which popup to
     /// create a view for.
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
-        let content_list = widget::list_column()
-            .padding(5)
-            .spacing(0)
-            .add(widget::settings::item(
-                fl!("example-row"),
-                widget::toggler(self.example_row).on_toggle(Message::ToggleExampleRow),
-            ));
+        let (width, height) = display_size().unwrap_or((1280, 720));
+        let chat = if self.chat_history.is_empty() {
+            widget::container(widget::text("Start a new Chat!"))
+                .center_y(cosmic::iced::Length::Fill)
+                .center_x(cosmic::iced::Length::Fill)
+        } else {
+            let mut chats: Vec<cosmic::Element<_>> = Vec::with_capacity(self.chat_history.len());
 
-        self.core.applet.popup_container(content_list).into()
+            for chat in self.chat_history.iter() {
+                let label = format!("{}: {}", chat.role, chat.content);
+                chats.push(widget::text(label).into());
+            }
+
+            widget::container(widget::scrollable(widget::Column::with_children(chats)))
+                .center_y(cosmic::iced::Length::Fill)
+                .center_x(cosmic::iced::Length::Fill)
+        };
+        let content = widget::container(
+            widget::container(column!(
+                chat,
+                widget::text_input("Enter text", &self.input_text)
+                    .on_input(Message::InputChanged)
+                    .width(cosmic::iced::Length::Fill)
+                    .padding(10)
+                    .on_submit(Message::SubmitInput)
+            ))
+            .padding([18, 10])
+            .style(|theme: &Theme| {
+                let bg_color = theme.cosmic().bg_component_color();
+                let radius = theme.cosmic().radius_s();
+
+                container::Style {
+                    background: Some(Background::Color(bg_color.into())),
+                    border: cosmic::iced_core::border::rounded(radius),
+
+                    ..Default::default()
+                }
+            }),
+        )
+        .padding([18, 10]);
+
+        self.core
+            .applet
+            .popup_container(content)
+            .limits(
+                cosmic::iced::Limits::NONE
+                    .min_height(height as f32 / 1.2)
+                    .min_width(width as f32 / 3.5)
+                    .max_width(width as f32 / 3.5)
+                    .max_height(height as f32 / 1.2),
+            )
+            .into()
     }
 
     /// Register subscriptions for this application.
@@ -152,37 +222,96 @@ impl cosmic::Application for AppModel {
     /// tasks are finished.
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
+            Message::InputChanged(text) => {
+                self.input_text = text;
+            }
+            Message::SubmitInput => {
+                let Some(history) = Arc::get_mut(&mut self.chat_history) else {
+                    return Task::none();
+                };
+                history.push(Chat {
+                    role: "user".into(),
+                    content: self.input_text.clone(),
+                });
+                let cloned = Arc::clone(&self.chat_history);
+                return cosmic::task::future(async move {
+                    Message::GeminiMessage(get_gemini_response(cloned).await)
+                });
+            }
             Message::SubscriptionChannel => {
                 // For example purposes only.
             }
             Message::UpdateConfig(config) => {
                 self.config = config;
             }
-            Message::ToggleExampleRow(toggled) => self.example_row = toggled,
             Message::TogglePopup => {
                 return if let Some(p) = self.popup.take() {
                     destroy_popup(p)
                 } else {
                     let new_id = Id::unique();
                     self.popup.replace(new_id);
-                    let mut popup_settings = self.core.applet.get_popup_settings(
+                    let popup_settings = self.core.applet.get_popup_settings(
                         self.core.main_window_id().unwrap(),
                         new_id,
                         None,
                         None,
                         None,
                     );
-                    popup_settings.positioner.size_limits = Limits::NONE
-                        .max_width(372.0)
-                        .min_width(300.0)
-                        .min_height(200.0)
-                        .max_height(1080.0);
                     get_popup(popup_settings)
-                }
+                };
             }
             Message::PopupClosed(id) => {
                 if self.popup.as_ref() == Some(&id) {
                     self.popup = None;
+                }
+            }
+            Message::GeminiMessage(message) => {
+                let Some(history) = Arc::get_mut(&mut self.chat_history) else {
+                    return Task::none();
+                };
+                match message {
+                    gemini::Message::RequestError(error) => {
+                        history.push(Chat {
+                            role: "model".into(),
+                            content: error,
+                        });
+                    }
+                    gemini::Message::ApiKeyNotSet => {
+                        history.push(Chat {
+                            role: "model".into(),
+                            content: "API key not set".into(),
+                        });
+                    }
+                    gemini::Message::ApiResultParsingError(error) => {
+                        history.push(Chat {
+                            role: "model".into(),
+                            content: format!("API result parsing error: {}", error),
+                        });
+                    }
+                    gemini::Message::ApiError(error) => {
+                        history.push(Chat {
+                            role: "model".into(),
+                            content: format!("API error: {}", error),
+                        });
+                    }
+                    gemini::Message::EmptyResponse => {
+                        history.push(Chat {
+                            role: "model".into(),
+                            content: "No response from model".into(),
+                        });
+                    }
+                    gemini::Message::PromptBlocked(error) => {
+                        history.push(Chat {
+                            role: "model".into(),
+                            content: format!("Prompt blocked: {}", error),
+                        });
+                    }
+                    gemini::Message::Response(response) => {
+                        history.push(Chat {
+                            role: "model".into(),
+                            content: response.into(),
+                        });
+                    }
                 }
             }
         }
