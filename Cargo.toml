@@ -38,6 +38,8 @@ features = [
     "wayland",
     # Windowing support for X11, Windows, Mac, & Redox
     "winit",
+    "markdown",
+    "highlighter"
 ]
 
 # Uncomment to test a locally-cloned libcosmic

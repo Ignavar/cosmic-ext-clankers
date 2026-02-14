@@ -2,21 +2,14 @@
 
 use crate::config::Config;
 use crate::models::gemini::{self, get_gemini_response};
-use cosmic::Element;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
-use cosmic::iced::Background;
-use cosmic::iced::{
-    Subscription,
-    widget::{self, column},
-    window::Id,
-};
-use cosmic::iced_runtime::task::widget;
+use cosmic::iced::{Subscription, widget::column, widget::markdown, window::Id};
 use cosmic::iced_winit::commands::popup::{destroy_popup, get_popup};
 use cosmic::prelude::*;
-use cosmic::widget::container::{self};
+use cosmic::widget;
+use cosmic::{Element, iced};
 use futures_util::SinkExt;
 use rdev::display_size;
-use std::fmt::format;
 use std::sync::Arc;
 
 pub const APPID: &str = "com.github.Ignavar.cosmic-ai-interface";
@@ -40,6 +33,8 @@ pub struct AppModel {
     input_text: String,
     /// Chat history.
     chat_history: Arc<Vec<Chat>>,
+    ///
+    is_loading: bool,
 }
 
 /// Messages emitted by the application and its widgets.
@@ -49,9 +44,10 @@ pub enum Message {
     PopupClosed(Id),
     SubscriptionChannel,
     UpdateConfig(Config),
-    SubmitInput,
+    SubmitInput(String),
     InputChanged(String),
     GeminiMessage(gemini::Message),
+    UrlClicked(markdown::Url),
 }
 
 impl From<gemini::Message> for Message {
@@ -130,43 +126,16 @@ impl cosmic::Application for AppModel {
     /// create a view for.
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
         let (width, height) = display_size().unwrap_or((1280, 720));
-        let chat = if self.chat_history.is_empty() {
-            widget::container(widget::text("Start a new Chat!"))
-                .center_y(cosmic::iced::Length::Fill)
-                .center_x(cosmic::iced::Length::Fill)
-        } else {
-            let mut chats: Vec<cosmic::Element<_>> = Vec::with_capacity(self.chat_history.len());
-
-            for chat in self.chat_history.iter() {
-                let label = format!("{}: {}", chat.role, chat.content);
-                chats.push(widget::text(label).into());
-            }
-
-            widget::container(widget::scrollable(widget::Column::with_children(chats)))
-                .center_y(cosmic::iced::Length::Fill)
-                .center_x(cosmic::iced::Length::Fill)
-        };
         let content = widget::container(
-            widget::container(column!(
-                chat,
+            column!(
+                self.chat_view(),
                 widget::text_input("Enter text", &self.input_text)
                     .on_input(Message::InputChanged)
                     .width(cosmic::iced::Length::Fill)
                     .padding(10)
                     .on_submit(Message::SubmitInput)
-            ))
-            .padding([18, 10])
-            .style(|theme: &Theme| {
-                let bg_color = theme.cosmic().bg_component_color();
-                let radius = theme.cosmic().radius_s();
-
-                container::Style {
-                    background: Some(Background::Color(bg_color.into())),
-                    border: cosmic::iced_core::border::rounded(radius),
-
-                    ..Default::default()
-                }
-            }),
+            )
+            .spacing(10),
         )
         .padding([18, 10]);
 
@@ -225,19 +194,25 @@ impl cosmic::Application for AppModel {
             Message::InputChanged(text) => {
                 self.input_text = text;
             }
-            Message::SubmitInput => {
+            Message::SubmitInput(text) => {
+                if self.is_loading {
+                    return Task::none();
+                }
                 let Some(history) = Arc::get_mut(&mut self.chat_history) else {
                     return Task::none();
                 };
+                self.is_loading = true;
                 history.push(Chat {
                     role: "user".into(),
-                    content: self.input_text.clone(),
+                    content: text.into(),
                 });
+                self.input_text.clear();
                 let cloned = Arc::clone(&self.chat_history);
                 return cosmic::task::future(async move {
                     Message::GeminiMessage(get_gemini_response(cloned).await)
                 });
             }
+            Message::UrlClicked(_) => {}
             Message::SubscriptionChannel => {
                 // For example purposes only.
             }
@@ -266,6 +241,7 @@ impl cosmic::Application for AppModel {
                 }
             }
             Message::GeminiMessage(message) => {
+                self.is_loading = false;
                 let Some(history) = Arc::get_mut(&mut self.chat_history) else {
                     return Task::none();
                 };
@@ -320,5 +296,56 @@ impl cosmic::Application for AppModel {
 
     fn style(&self) -> Option<cosmic::iced_runtime::Appearance> {
         Some(cosmic::applet::style())
+    }
+}
+
+impl AppModel {
+    fn chat_view(&self) -> cosmic::Element<'_, Message> {
+        if self.chat_history.is_empty() {
+            widget::container(widget::text("Start a new Chat!"))
+                .center_y(cosmic::iced::Length::Fill)
+                .center_x(cosmic::iced::Length::Fill)
+                .into()
+        } else {
+            let mut chats: Vec<cosmic::Element<_>> = Vec::with_capacity(self.chat_history.len());
+
+            for chat in self.chat_history.iter() {
+                let markdown: Vec<markdown::Item> = markdown::parse(&chat.content).collect();
+                let content = markdown::view(
+                    &markdown,
+                    markdown::Settings::with_text_size(15),
+                    markdown::Style::from_palette(iced::Theme::TokyoNight.palette()),
+                )
+                .map(Message::UrlClicked);
+                let bubble = if chat.role == "user" {
+                    widget::container(
+                        widget::container(content)
+                            .class(cosmic::theme::Container::List)
+                            .padding(10),
+                    )
+                    .align_right(iced::Length::Fill)
+                    .into()
+                } else {
+                    widget::container(
+                        widget::container(content)
+                            .class(cosmic::theme::Container::List)
+                            .padding(10),
+                    )
+                    .align_left(iced::Length::Fill)
+                    .into()
+                };
+                chats.push(bubble);
+            }
+
+            widget::container(
+                widget::scrollable(widget::Column::with_children(chats).spacing(20))
+                    .spacing(2)
+                    .scroller_width(0)
+                    .scrollbar_width(0),
+            )
+            .center_x(cosmic::iced::Length::Fill)
+            .align_top(iced::Length::Fill)
+            .into()
+        }
     }
 }
