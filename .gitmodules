@@ -1,3 +1,3 @@
 [submodule "iced_selection"]
 	path = iced_selection
-	url = https://github.com/Ignavar/iced_selection_cosmic
+	url = https://github.com/Ignavar/iced_selection_cosmic.git

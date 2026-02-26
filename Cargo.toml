@@ -16,6 +16,7 @@ rust-embed = "8.7.2"
 serde = "1.0.228"
 serde_json = "1.0.149"
 tokio = { version = "1.48.0", features = ["full"] }
+iced_selection = {path = "./iced_selection", features=["markdown"]}
 
 [dependencies.i18n-embed]
 version = "0.16"

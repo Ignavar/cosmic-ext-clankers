@@ -12,6 +12,8 @@ use futures_util::SinkExt;
 use rdev::display_size;
 use std::sync::Arc;
 
+use iced_selection::{cosmic_select, cosmic_text};
+
 pub const APPID: &str = "com.github.Ignavar.cosmic-ai-interface";
 
 pub struct Chat {
@@ -302,7 +304,7 @@ impl cosmic::Application for AppModel {
 impl AppModel {
     fn chat_view(&self) -> cosmic::Element<'_, Message> {
         if self.chat_history.is_empty() {
-            widget::container(widget::text("Start a new Chat!"))
+            widget::container(cosmic_text!("Start a new Chat!"))
                 .center_y(cosmic::iced::Length::Fill)
                 .center_x(cosmic::iced::Length::Fill)
                 .into()
@@ -311,7 +313,7 @@ impl AppModel {
 
             for chat in self.chat_history.iter() {
                 let markdown: Vec<markdown::Item> = markdown::parse(&chat.content).collect();
-                let content = markdown::view(
+                let content = cosmic_select::markdown::view(
                     &markdown,
                     markdown::Settings::with_text_size(15),
                     markdown::Style::from_palette(iced::Theme::TokyoNight.palette()),
